@@ -6,3 +6,8 @@ Run
 ```shell
 go test
 ```
+
+Result
+
+<!-- RESULT:BEGIN -->
+<!-- RESULT:END -->
