@@ -155,7 +155,7 @@ func TestBypassRateLimiterSmallZoneSizeBurst(t *testing.T) {
 	endpoint := Prepare(
 		t,
 		`
-			It's an example of what happens with requests waiting in burst's buffer, when zone is exhausted.
+			Here is what happens with requests waiting in burst's buffer, when zone is exhausted.
 			I thought they should be rejected, but in fact they are processed.
 		`,
 		`
