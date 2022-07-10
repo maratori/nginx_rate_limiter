@@ -13,21 +13,29 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
 
 func TestSimple(t *testing.T) {
-	endpoint := StartNginx(t, `
-		limit_req_zone $request_uri zone=my_zone:1m rate=30r/m;
-		server {
-			listen 80;
-			location / {
-				limit_req zone=my_zone;
-				try_files $uri /index.html;
+	endpoint := Prepare(
+		t,
+		`
+			Just an example of rate limiter, no surprise.
+			Each uri has it's own leaky bucket (without buffer) which drains each 2 seconds.
+		`,
+		`
+			limit_req_zone $uri zone=my_zone:1m rate=30r/m;
+			server {
+				listen 80;
+				location / {
+					limit_req zone=my_zone;
+					try_files $uri /index.html;
+				}
 			}
-		}
-	`)
+		`,
+	)
 
 	Print(GetMany(endpoint, map[string]int{
 		"/0": 2,
@@ -52,16 +60,23 @@ func TestSimple(t *testing.T) {
 }
 
 func TestSimpleBurst(t *testing.T) {
-	endpoint := StartNginx(t, `
-		limit_req_zone $request_uri zone=my_zone:1m rate=12r/m;
-		server {
-			listen 80;
-			location / {
-				limit_req zone=my_zone burst=2;
-				try_files $uri /index.html;
+	endpoint := Prepare(
+		t,
+		`
+			Just an example of burst config, no surprise.
+			It creates buffer for each leaky bucket.
+		`,
+		`
+			limit_req_zone $uri zone=my_zone:1m rate=12r/m;
+			server {
+				listen 80;
+				location / {
+					limit_req zone=my_zone burst=2;
+					try_files $uri /index.html;
+				}
 			}
-		}
-	`)
+		`,
+	)
 
 	Print(GetMany(endpoint, map[string]int{
 		"/0": 5,
@@ -70,16 +85,23 @@ func TestSimpleBurst(t *testing.T) {
 }
 
 func TestSimpleBurstNodelay(t *testing.T) {
-	endpoint := StartNginx(t, `
-		limit_req_zone $request_uri zone=my_zone:1m rate=30r/m;
-		server {
-			listen 80;
-			location / {
-				limit_req zone=my_zone burst=2 nodelay;
-				try_files $uri /index.html;
+	endpoint := Prepare(
+		t,
+		`
+			Just an example of nodelay config, no surprise.
+			The same as previous, but all requests are processed at the same time.
+		`,
+		`
+			limit_req_zone $uri zone=my_zone:1m rate=30r/m;
+			server {
+				listen 80;
+				location / {
+					limit_req zone=my_zone burst=2 nodelay;
+					try_files $uri /index.html;
+				}
 			}
-		}
-	`)
+		`,
+	)
 
 	Print(GetMany(endpoint, map[string]int{
 		"/0": 5,
@@ -96,20 +118,28 @@ func TestSimpleBurstNodelay(t *testing.T) {
 }
 
 func TestBypassRateLimiterSmallZoneSize(t *testing.T) {
-	endpoint := StartNginx(t, `
-		limit_req_zone $huge$request_uri zone=my_zone:32k rate=1r/m;
-		server {
-			listen 80;
-			location / {
-				set $x 1234567890;
-				set $y $x$x$x$x$x$x$x$x$x$x;
-				set $z $y$y$y$y$y$y$y$y$y$y;
-				set $huge $z$z$z$z$z;
-				limit_req zone=my_zone;
-				try_files $uri /index.html;
+	endpoint := Prepare(
+		t,
+		`
+			It's possible to bypass rate limiter, if zone size is small.
+			Nginx forgets about least recently used key, if zone is exhausted.
+			It means hacker can cycle requests.
+		`,
+		`
+			limit_req_zone $huge$uri zone=my_zone:32k rate=1r/m;
+			server {
+				listen 80;
+				location / {
+					set $x 1234567890;
+					set $y $x$x$x$x$x$x$x$x$x$x;
+					set $z $y$y$y$y$y$y$y$y$y$y;
+					set $huge $z$z$z$z$z;
+					limit_req zone=my_zone;
+					try_files $uri /index.html;
+				}
 			}
-		}
-	`)
+		`,
+	)
 
 	Print(GetMany(endpoint, map[string]int{
 		"/some": 2,
@@ -122,20 +152,27 @@ func TestBypassRateLimiterSmallZoneSize(t *testing.T) {
 }
 
 func TestBypassRateLimiterSmallZoneSizeBurst(t *testing.T) {
-	endpoint := StartNginx(t, `
-		limit_req_zone $huge$request_uri zone=my_zone:32k rate=12r/m;
-		server {
-			listen 80;
-			location / {
-				set $x 1234567890;
-				set $y $x$x$x$x$x$x$x$x$x$x;
-				set $z $y$y$y$y$y$y$y$y$y$y;
-				set $huge $z$z$z$z$z;
-				limit_req zone=my_zone burst=2;
-				try_files $uri /index.html;
+	endpoint := Prepare(
+		t,
+		`
+			It's an example of what happens with requests waiting in burst's buffer, when zone is exhausted.
+			I thought they should be rejected, but in fact they are processed.
+		`,
+		`
+			limit_req_zone $huge$uri zone=my_zone:32k rate=12r/m;
+			server {
+				listen 80;
+				location / {
+					set $x 1234567890;
+					set $y $x$x$x$x$x$x$x$x$x$x;
+					set $z $y$y$y$y$y$y$y$y$y$y;
+					set $huge $z$z$z$z$z;
+					limit_req zone=my_zone burst=2;
+					try_files $uri /index.html;
+				}
 			}
-		}
-	`)
+		`,
+	)
 
 	const (
 		original = "/x"
@@ -260,10 +297,30 @@ func GetMany(base string, urls map[string]int) []Result {
 	return res
 }
 
-func StartNginx(t *testing.T, conf string) string {
-	fmt.Println("# " + t.Name())
-	fmt.Println(conf)
+func Prepare(t *testing.T, testDescription string, config string) string {
+	config = dedent.Dedent(config)
+	testDescription = dedent.Dedent(testDescription)
+	println("## " + t.Name())
+	for _, line := range strings.Split(testDescription, "\n") {
+		if line == "" {
+			continue
+		}
+		println("    " + line)
+	}
+	println()
+	for _, line := range strings.Split(config, "\n") {
+		if line == "" {
+			continue
+		}
+		println("        " + line)
+	}
+	println()
+	t.Cleanup(func() { println() })
+	PrintHeader()
+	return StartNginx(t, config)
+}
 
+func StartNginx(t *testing.T, config string) string {
 	const dockerfile = `
 		FROM nginx:alpine
 		COPY default.conf /etc/nginx/conf.d/default.conf
@@ -273,7 +330,7 @@ func StartNginx(t *testing.T, conf string) string {
 	dir := t.TempDir()
 	err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dedent.Dedent(dockerfile)), 0666)
 	require.NoError(t, err)
-	err = os.WriteFile(filepath.Join(dir, "default.conf"), []byte(dedent.Dedent(conf)), 0666)
+	err = os.WriteFile(filepath.Join(dir, "default.conf"), []byte(config), 0666)
 	require.NoError(t, err)
 	err = os.WriteFile(filepath.Join(dir, "index.html"), []byte("ok"), 0666)
 	require.NoError(t, err)
@@ -296,11 +353,5 @@ func StartNginx(t *testing.T, conf string) string {
 
 	endpoint, err := c.Endpoint(ctx, "http")
 	require.NoError(t, err)
-
-	println()
-	t.Cleanup(func() { println() })
-
-	PrintHeader()
-
 	return endpoint
 }
